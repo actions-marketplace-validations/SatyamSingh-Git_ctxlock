@@ -222,3 +222,37 @@ describe('final review', () => {
     expect(l18(quieted).map(([rule]) => rule)).toEqual(['L18-suppressed']);
   });
 });
+
+describe('minor fixes', () => {
+  it('an ignore whose files exist but quiet nothing may be for agnix, so without agnix it is info; one matching no file is stale', async () => {
+    const files = { ...yaml('  ignore:\n    - "docs/**"\n    - "gone/**"\n'), 'docs/guide.md': 'How to.\n' };
+    const ctx = await lintContext(files);
+
+    expect(l18(await runLint(ctx))).toEqual([
+      ['L18-unused', 'should', 'ctxlock.yaml', 'lint.ignore pattern "gone/**" quiets nothing'],
+      ['L18-unused', 'info', 'ctxlock.yaml', 'lint.ignore pattern "docs/**" quiets nothing in this run; agnix did not run, and the pattern may be for it'],
+    ]);
+    ctx.agnixRan = true;
+    expect(l18(await runLint(ctx)).map(([, severity, , message]) => [severity, message])).toEqual([
+      ['should', 'lint.ignore pattern "docs/**" quiets nothing'],
+      ['should', 'lint.ignore pattern "gone/**" quiets nothing'],
+    ]);
+  });
+
+  it('a directive in YAML frontmatter is not a directive, and is reported as the hidden comment it is', async () => {
+    const body = Array.from({ length: 600 }, (_, i) => `Step ${i}.`).join('\n');
+    const skill = `---\nname: big\ndescription: A long skill\n# <!-- ctxlock-ignore-file L6-skill-length: generated -->\n---\n${body}\n`;
+    const out = await runLint(await lintContext({ '.claude/skills/big/SKILL.md': skill }));
+
+    expect(out.map((f) => f.rule)).toContain('L6-skill-length');
+    expect(out).toContainEqual(expect.objectContaining({ rule: 'L1-html-comment', severity: 'must', line: 4 }));
+    expect(l18(out)).toEqual([]);
+  });
+
+  it('a finding reported twice is one finding, and is counted once', async () => {
+    const twice = finding('L9-stale', 'should', 'AGENTS.md', { line: 2 });
+    const out = await runLint(await lintContext({ 'AGENTS.md': '<!-- ctxlock-ignore-file L9-stale: old script -->\nnpm run x\n' }), [twice, { ...twice }]);
+
+    expect(l18(out)).toEqual([['L18-suppressed', 'info', 'AGENTS.md', 'ctxlock-ignore-file quiets 1 finding of L9-stale: old script']]);
+  });
+});

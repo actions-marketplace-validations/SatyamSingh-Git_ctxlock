@@ -1,7 +1,7 @@
 import picomatch from 'picomatch';
 import type { Finding } from '../model.js';
 import type { LintException } from '../registry/registry.js';
-import { htmlComments, textFiles } from './files.js';
+import { frontmatterEnd, htmlComments, textFiles } from './files.js';
 import type { LintContext } from './types.js';
 
 export interface Directive {
@@ -47,10 +47,12 @@ export function parseDirective(comment: string): Pick<Directive, 'scope' | 'rule
 export async function findDirectives(ctx: LintContext): Promise<Directive[]> {
   const directives: Directive[] = [];
   for await (const { path, text } of textFiles(ctx, undefined, true)) {
-    if (!path.endsWith('.md')) continue;
+    // Finding comments outside code parses the markdown; most files have no directive to find.
+    if (!path.endsWith('.md') || !text.includes('ctxlock-ignore')) continue;
     const lines = text.split(/\r?\n/);
+    const front = frontmatterEnd(text);
     for (const { comment, line } of htmlComments(text)) {
-      const parsed = parseDirective(comment);
+      const parsed = line > front ? parseDirective(comment) : null;
       if (!parsed) continue;
       const next = lines.findIndex((l, i) => i >= line && l.trim() !== '');
       directives.push({ path, line, ...parsed, target: parsed.scope === 'next-line' && next !== -1 ? next + 1 : null });
@@ -71,7 +73,7 @@ const quiets = (d: Directive, f: Finding) => f.path === d.path && d.rules.includ
 
 // Exceptions, then directives, then lint.ignore: a finding quieted by one step is not there for the next,
 // so it counts as used only once. The L18 findings come after every step, so nothing can drop them.
-export function quiet(found: Finding[], ctx: LintContext, directives: Directive[]): Finding[] {
+export async function quiet(found: Finding[], ctx: LintContext, directives: Directive[]): Promise<Finding[]> {
   const { ignore } = ctx.registry.lint;
   const exceptions = ctx.suppressions === false ? [] : ctx.registry.lint.exceptions;
   const live = exceptions.filter((e) => ctx.today <= e.expires);
@@ -126,8 +128,15 @@ export function quiet(found: Finding[], ctx: LintContext, directives: Directive[
       report.push({ rule: 'L18-unused', severity: 'should', ...at, message: `ctxlock-ignore-${d.scope} ${d.rules.join(' ')} quiets nothing${why}: ${d.reason}` });
     }
   }
-  for (const { p, used } of patterns) {
-    if (used === 0) report.push({ rule: 'L18-unused', severity: 'should', path: CONFIG, message: `lint.ignore pattern "${p}" quiets nothing` });
+  // A pattern names paths, not rules, so one whose files exist may be there for agnix's findings alone.
+  const files = patterns.some((x) => x.used === 0) && !ctx.agnixRan ? await ctx.reader.listFiles() : [];
+  for (const { p, match, used } of patterns) {
+    if (used > 0) continue;
+    if (files.some((path) => match(path))) {
+      report.push({ rule: 'L18-unused', severity: 'info', path: CONFIG, message: `lint.ignore pattern "${p}" quiets nothing in this run; agnix did not run, and the pattern may be for it` });
+    } else {
+      report.push({ rule: 'L18-unused', severity: 'should', path: CONFIG, message: `lint.ignore pattern "${p}" quiets nothing` });
+    }
   }
   return [...kept, ...report];
 }

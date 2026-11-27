@@ -100,6 +100,16 @@ describe('ctxlock diff', () => {
     expect(JSON.parse(stdout).execChanges.map((f: { message: string }) => f.message)).toEqual(['New or changed: allowed-tools approves "Bash(*)"']);
   });
 
+  it("the text diff never prints a control character from the pull request's files", async () => {
+    const esc = String.fromCodePoint(0x1b);
+    const { dir, shas } = await gitRepo([{ 'AGENTS.md': 'a' }, { '.claude/settings.json': hook(`echo ${esc}]0;owned${String.fromCodePoint(7)}`) }]);
+
+    const { stdout } = await cli('diff', '--base', shas[0]!, '--head', shas[1]!, dir);
+
+    expect(stdout).toContain('SessionStart hook');
+    expect(stdout).not.toContain(esc);
+  });
+
   it('adding a SessionStart hook is an execution-affecting change and exits 1', async () => {
     const { dir, shas } = await gitRepo([{ 'AGENTS.md': 'a' }, { '.claude/settings.json': hook('node scripts/setup.js') }]);
 
@@ -175,6 +185,21 @@ describe('ctxlock diff', () => {
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout).newFindings).toContainEqual(expect.objectContaining({ rule: 'L18-suppressed', path: 'AGENTS.md' }));
+  });
+
+  it('a directive that quiets more findings than on the base shows in the diff', async () => {
+    const agents = (lines: string) => `<!-- ctxlock-ignore-file L9-stale: the scripts land next sprint -->\n${lines}`;
+    const pkg = JSON.stringify({ scripts: {} });
+    const { dir, shas } = await gitRepo([
+      { 'package.json': pkg, 'AGENTS.md': agents('Run `pnpm test`.\n') },
+      { 'package.json': pkg, 'AGENTS.md': agents('Run `pnpm test`.\nRun `npm run lint`.\n') },
+    ]);
+
+    const { stdout } = await cli('diff', '--base', shas[0]!, '--head', shas[1]!, dir, '--format', 'json');
+
+    expect(JSON.parse(stdout).newFindings).toContainEqual(
+      expect.objectContaining({ rule: 'L18-suppressed', message: 'ctxlock-ignore-file quiets 2 findings of L9-stale: the scripts land next sprint' }),
+    );
   });
 
   it('a new inline directive shows in the diff with its reason', async () => {
